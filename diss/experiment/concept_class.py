@@ -10,11 +10,17 @@ from dfa import DFA
 from dfa.utils import find_subset_counterexample, find_equiv_counterexample
 from dfa.utils import minimize
 from dfa_identify import find_dfa, find_dfas
+from diss.dfa_identify.decompose import enumerate_pareto_frontier_then_beyond
 
 from diss import LabeledExamples, ConceptIdException
 from diss import DemoPrefixTree as PrefixTree
 from diss.learn import surprisal
 from diss.concept_classes.dfa_concept import DFAConcept
+from diss.concept_classes.dfa_decomposition_concept import DFAProductConcept
+
+from functools import reduce
+from more_itertools import interleave_longest, interleave
+from collections import deque
 
 
 __all__ = ['to_concept', 'ignore_white']
@@ -157,6 +163,68 @@ def augment(self: PartialDFAIdentifier, data: LabeledExamples) -> LabeledExample
             break
     return data
 
+def remove_partial_examples(partials: list[DFA], data: LabeledExamples):
+    partial_conj = dfa.utils.minimize(reduce(lambda x, y: x & y, partials))
+
+    # remove data that is already labeled as reject (i.e. False)
+    augmented_neg = filter(partial_conj.label, data.negative)
+
+    return LabeledExamples(negative=augmented_neg, positive=data.positive)
+
+@attr.frozen
+class PartialProductDFAIdentifier:
+    partials: list[DFA] = None
+    base_examples: LabeledExamples = LabeledExamples()
+    alphabet: set = None
+
+    def __call__(self, data: LabeledExamples, concept: DFAProductConcept) -> DFAProductConcept:
+
+        # # filter out white
+        # new_pos = []
+        # for t in data.positive:
+        #     new_t = []
+        #     for c in t:
+        #         if c != "white":
+        #             new_t.append(c)
+        #     new_pos.append(tuple(new_t))
+
+        # new_neg = []
+        # for t in data.negative:
+        #     new_t = []
+        #     for c in t:
+        #         if c != "white":
+        #             new_t.append(c)
+        #     new_neg.append(tuple(new_t))
+
+        # data = LabeledExamples(positive=new_pos, negative=new_neg)
+
+        # remove the known partial dfas from the product
+        if self.partials is not None:
+            num_partials = len(self.partials)
+            if concept is not None:
+                augmented_dfas = [dfa_concept.dfa for dfa_concept in concept.dfa_concepts[num_partials:]]
+                reference = DFAProductConcept.from_dfas(augmented_dfas)
+            else:
+                reference = concept
+            data = remove_partial_examples(self.partials, data)
+        else:
+            reference = concept
+
+        data = data @ self.base_examples
+
+        concept = DFAProductConcept.from_examples(
+            data=data,
+            order_by_stutter=True,
+            temp=1,
+            alphabet=self.alphabet,
+            ref=reference
+        ) 
+
+        if self.partials is not None:
+            augmented_dfas = self.partials + [dfa_concept.dfa for dfa_concept in concept.dfa_concepts] 
+            return DFAProductConcept.from_dfas(augmented_dfas)
+        else:
+            return concept
 
 
 @attr.frozen
@@ -223,6 +291,106 @@ def enumerative_search(
     ref_size = identifer.partial.size
     concepts = map(DFAConcept.from_dfa, dfas)
     concepts = (attr.evolve(c, size=c.size - ref_size) for c in concepts)
+    print(f'Enumerating {n_iters} DFAs in lexicographic order...')
+    concepts = fn.take(n_iters, concepts)
+    print(f'Sorting by size')
+    concepts = sorted(concepts, key=lambda c: c.size)
+    for concept in concepts:
+        chain = to_chain(concept, tree, competency(concept, tree))
+        metadata = {
+            'energy': weights @ [concept.size, surprisal(chain, tree)],
+        }
+ 
+        yield LabeledExamples(), concept, metadata
+
+def bfs(data, num_dfas, alphabet=None):
+    min_dfa_size = [2]*num_dfas
+    size_q = deque()
+    size_q.append(min_dfa_size)
+    while size_q:
+        dfa_sizes = size_q.popleft()
+        print(dfa_sizes)
+        dfa_gen = find_dfa_decompositions(
+            accepting=data.positive,
+            rejecting=data.negative,
+            num_dfas=num_dfas,
+            dfa_sizes=dfa_sizes,
+            order_by_stutter=True,
+            allow_unminimized=False,
+            alphabet=alphabet
+        )
+        try:
+            # yield the dfa from this generator
+            yield dfa_gen #, sum(dfa_sizes)
+        except StopIteration:
+            pass
+        for i in range(num_dfas):
+            new_dfa_sizes = list(dfa_sizes)
+            new_dfa_sizes[i] += 1
+            nondecreasing = all(new_dfa_sizes[i] <= new_dfa_sizes[i+1] for i in range(len(new_dfa_sizes) - 1))
+            not_in_queue = new_dfa_sizes not in size_q
+
+            # we want to avoid making symmetric solves, so only append the sizes that are ordered in increasing size
+            if nondecreasing and not_in_queue:
+                size_q.append(new_dfa_sizes)
+
+# def exhaust_pareto_frontier(data, num_dfa_upper, alphabet=None):
+#     dfa_state_sum = 2
+#     while True:
+#         for num_dfas in range(num_dfa_upper+1):
+#             # get all valid generators for dfa decompositions with num_dfas dfas whose states sum to dfa_state_sum
+#             for m in itertools
+
+
+#         dfa_state_sum += 1
+
+def get_next_smallest(dfas_gens):
+    prev_sizes = [0] * len(dfas_gens)
+    while True:
+        i = np.argmin(prev_sizes)
+        next_dfas = next(dfas_gens[i])
+        yield from next_dfas
+        prev_sizes[i] = sum([len(dfa.states()) for dfa in next_dfas])
+
+def decomposition_enumerative_search(
+    demos: Demos, 
+    identifer: PartialProductDFAIdentifier(),
+    to_chain: MarkovChainFact,
+    competency: CompetencyEstimator,
+    n_iters: int = 25,
+    size_weight: float = 1,
+    surprise_weight: float = 1,
+    num_dfas_upper: int = 3,
+):
+    tree = PrefixTree.from_demos(demos)
+    weights = np.array([size_weight, surprise_weight])
+    data = identifer.base_examples
+    if identifer.partials is not None:
+        data = remove_partial_examples(identifer.partials, data)
+
+    # dfa_gens = [bfs(data, num_dfas, identifer.alphabet) for num_dfas in range(1,num_dfas_upper+1)]
+    # dfas = get_next_smallest(dfa_gens)
+    dfa_gens = [enumerate_pareto_frontier_then_beyond(data.positive, 
+                data.negative, 
+                alphabet=identifer.alphabet, 
+                order_by_stutter=True,
+                num_dfas=num_dfas) for num_dfas in range(1,num_dfas_upper+1)]
+    dfas = interleave(*dfa_gens)
+    # dfas = (attr.evolve(d, outputs={True, False}) for d in dfas)
+    # dfas = filter(identifer.is_subset, dfas)
+    dfas = map(lambda x : [minimize(dfa) for dfa in x], dfas)
+    # pass to tuple so that we can hash
+    dfas = map(tuple, dfas)
+    dfas = fn.distinct(dfas)
+
+    # add the partial dfas 
+    if identifer.partials is not None:
+        dfas = map(lambda x : identifer.partials + list(x), dfas)
+
+    # Convert to representation class.
+    # ref_size = identifer.partial.size
+    concepts = map(DFAProductConcept.from_dfas, dfas)
+    # concepts = (attr.evolve(c, size=c.size - ref_size) for c in concepts)
     print(f'Enumerating {n_iters} DFAs in lexicographic order...')
     concepts = fn.take(n_iters, concepts)
     print(f'Sorting by size')

@@ -7,6 +7,7 @@ from IPython.display import SVG
 from IPython.display import HTML as html_print
 
 from diss.concept_classes.dfa_concept import remove_stutter, DFAConcept
+from diss.concept_classes.dfa_decomposition_concept import DFAProductConcept
 
 
 COLOR_ALIAS = {
@@ -48,6 +49,11 @@ def get_dot(dfa_):
     g.set_bgcolor("#00000000")        
     return g
 
+def view_dfas(dfas_or_concepts):
+    if isinstance(dfas_or_concepts, DFAProductConcept):
+        dfas_or_concepts = [c.dfa for c in dfas_or_concepts.dfa_concepts]
+    svgs = [SVG(get_dot(dfa).create_svg()) for dfa in dfas_or_concepts]
+    display(*svgs)
 
 def view_dfa(dfa_or_concept):
     if isinstance(dfa_or_concept, DFAConcept):
