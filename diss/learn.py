@@ -277,10 +277,11 @@ def diss(
     signal.signal(signal.SIGALRM, handler)
 
     def drop_pred(example):
-        match example_drop_prob:
-            case 0.0: return True
-            case 1.0: return False
-            case p: return p <= random.random()
+        if example_drop_prob == 0.0:
+            return True
+        elif example_drop_prob == 1.0:
+            return False
+        return example_drop_prob <= random.random()
 
     weights = np.array([size_weight, surprise_weight])
     concept2energy = {}    # Concepts seen so far + associated energies.
@@ -308,6 +309,7 @@ def diss(
             concept2data.setdefault(concept, proposed_examples)
         except ConceptIdException:
             new_data = LabeledExamples()  # Reject: New data caused problem. 
+            signal.alarm(0)  # Unset alarm.
             continue
 
         new_data, metadata = sggs(concept)
